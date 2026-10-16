@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ruang Meet</title>
+<style>
+:root{--bg:#f3f5f4;--panel:#fff;--ink:#14231f;--mute:#5d6f69;--line:#d8e0dd;--brand:#0f766e;--danger:#c2410c;--tile:#0e1a17}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1411;--panel:#13201c;--ink:#e8f1ee;--mute:#8fa59e;--line:#233630;--brand:#2dd4bf;--tile:#050a08}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{font-family:"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+button,input{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--brand);outline-offset:2px}
+#lobby{min-height:100%;display:grid;place-items:center;padding:20px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;width:min(420px,100%)}
+h1{margin:0 0 4px;font-size:28px}.sub{color:var(--mute);margin:0 0 20px}
+label{display:block;font-size:14px;margin:12px 0 4px}
+input{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:transparent}
+.btn{padding:11px 16px;border-radius:8px;border:1px solid var(--line);background:var(--panel);cursor:pointer}
+.btn.primary{background:var(--brand);color:#fff;border-color:var(--brand);width:100%;margin-top:18px;font-weight:600}
+@media (prefers-color-scheme:dark){.btn.primary{color:#04201b}}
+#app{display:none;height:100%;grid-template-columns:1fr 320px;grid-template-rows:1fr auto}
+#grid{grid-column:1;padding:12px;display:grid;gap:10px;overflow:auto;align-content:center;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.tile{position:relative;background:var(--tile);border-radius:12px;overflow:hidden;aspect-ratio:16/9}
+.tile video{width:100%;height:100%;object-fit:cover}
+.tile .nm{position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.6);color:#fff;padding:3px 9px;border-radius:6px;font-size:13px}
+#side{grid-column:2;grid-row:1/3;border-left:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+#side h2{font-size:15px;margin:0;padding:14px;border-bottom:1px solid var(--line)}
+#msgs{flex:1;overflow:auto;padding:12px;font-size:14px}
+#msgs p{margin:0 0 10px}#msgs b{color:var(--brand)}
+#chatform{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}
+#bar{grid-column:1;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;padding:12px;border-top:1px solid var(--line);background:var(--panel)}
+.btn.off{background:var(--danger);border-color:var(--danger);color:#fff}
+.btn.leave{background:var(--danger);border-color:var(--danger);color:#fff}
+#toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;display:none}
+@media (max-width:760px){#app{grid-template-columns:1fr;grid-template-rows:1fr auto 220px}#side{grid-column:1;grid-row:3;border-left:0;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<section id="lobby">
+  <div class="card">
+    <h1>Ruang Meet</h1>
+    <p class="sub">Meeting video tanpa batas waktu.</p>
+    <label for="name">Nama Anda</label>
+    <input id="name" maxlength="30" placeholder="mis. Budi">
+    <label for="room">Kode ruangan</label>
+    <input id="room" maxlength="40" placeholder="mis. rapat-tim">
+    <button class="btn primary" id="joinBtn">Masuk ruangan</button>
+  </div>
+</section>
+
+<section id="app">
+  <div id="grid"></div>
+  <aside id="side">
+    <h2>Chat ruangan</h2>
+    <div id="msgs" aria-live="polite"></div>
+    <form id="chatform"><input id="chatin" placeholder="Tulis pesan" autocomplete="off"><button class="btn">Kirim</button></form>
+  </aside>
+  <div id="bar">
+    <button class="btn" id="micBtn">Matikan mik</button>
+    <button class="btn" id="camBtn">Matikan kamera</button>
+    <button class="btn" id="scrBtn">Bagikan layar</button>
+    <button class="btn" id="copyBtn">Salin tautan</button>
+    <button class="btn leave" id="leaveBtn">Keluar</button>
+  </div>
+</section>
+<div id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }
+  // Tambahkan server TURN Anda sendiri agar tembus NAT ketat:
+  // ,{ urls: 'turn:turn.domainanda.com:3478', username: 'user', credential: 'pass' }
+] };
+// Setelah deploy server ke Render, isi dengan alamat WebSocket-nya, mis. 'wss://ruang-meet.onrender.com'
+// Biarkan kosong jika server.js dan halaman ini berjalan di domain yang sama.
+const SIGNAL_URL = '';
+let ws, myId, myName, roomId, local, camTrack, peers = {};
+
+const pre = location.pathname.startsWith('/r/') ? decodeURIComponent(location.pathname.slice(3)) : '';
+$('#room').value = pre;
+$('#name').value = localStorage.getItem('rm-name') || '';
+
+function toast(t) { const e = $('#toast'); e.textContent = t; e.style.display = 'block'; setTimeout(() => e.style.display = 'none', 2500); }
+
+function tile(id, name, stream, muted) {
+  let t = document.getElementById('t-' + id);
+  if (!t) {
+    t = document.createElement('div'); t.className = 'tile'; t.id = 't-' + id;
+    t.innerHTML = '<video autoplay playsinline></video><span class="nm"></span>';
+    $('#grid').appendChild(t);
+  }
+  const v = t.querySelector('video'); v.srcObject = stream; v.muted = !!muted;
+  t.querySelector('.nm').textContent = name;
+}
+
+function createPeer(id, name, initiator) {
+  const pc = new RTCPeerConnection(ICE);
+  peers[id] = { pc, name };
+  local.getTracks().forEach((tr) => pc.addTrack(tr, local));
+  pc.onicecandidate = (e) => e.candidate && sig(id, { candidate: e.candidate });
+  pc.ontrack = (e) => tile(id, name, e.streams[0]);
+  pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') pc.restartIce(); };
+  if (initiator) {
+    pc.onnegotiationneeded = async () => {
+      await pc.setLocalDescription(await pc.createOffer());
+      sig(id, { sdp: pc.localDescription });
+    };
+  }
+  return pc;
+}
+const sig = (to, data) => ws.send(JSON.stringify({ type: 'signal', to, data }));
+
+async function onSignal(from, data) {
+  let p = peers[from]; const pc = p ? p.pc : createPeer(from, 'Peserta', false);
+  if (data.sdp) {
+    await pc.setRemoteDescription(data.sdp);
+    if (data.sdp.type === 'offer') {
+      await pc.setLocalDescription(await pc.createAnswer());
+      sig(from, { sdp: pc.localDescription });
+    }
+  } else if (data.candidate) {
+    try { await pc.addIceCandidate(data.candidate); } catch {}
+  }
+}
+
+function addMsg(who, text) {
+  const p = document.createElement('p'); const b = document.createElement('b');
+  b.textContent = who + ': '; p.append(b, document.createTextNode(text));
+  $('#msgs').appendChild(p); $('#msgs').scrollTop = 1e9;
+}
+
+async function join() {
+  myName = $('#name').value.trim() || 'Tamu';
+  roomId = $('#room').value.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-');
+  if (!roomId) return toast('Isi kode ruangan dulu');
+  localStorage.setItem('rm-name', myName);
+  try {
+    local = await navigator.mediaDevices.getUserMedia({ video: true, audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch { return toast('Izinkan akses kamera dan mikrofon di browser'); }
+  camTrack = local.getVideoTracks()[0];
+  history.replaceState(null, '', '/r/' + encodeURIComponent(roomId));
+  ws = new WebSocket(SIGNAL_URL || ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host));
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', room: roomId, name: myName }));
+  ws.onmessage = async (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'full') { toast('Ruangan penuh'); leave(); }
+    else if (m.type === 'joined') {
+      myId = m.id; $('#lobby').style.display = 'none'; $('#app').style.display = 'grid';
+      tile('me', myName + ' (Anda)', local, true);
+      m.peers.forEach((p) => createPeer(p.id, p.name, true));
+    } else if (m.type === 'peer-joined') { toast(m.name + ' bergabung'); createPeer(m.id, m.name, false); }
+    else if (m.type === 'peer-left') {
+      const p = peers[m.id]; if (p) { toast(p.name + ' keluar'); p.pc.close(); delete peers[m.id]; }
+      document.getElementById('t-' + m.id)?.remove();
+    } else if (m.type === 'signal') onSignal(m.from, m.data);
+    else if (m.type === 'chat') addMsg(m.from, m.text);
+  };
+  ws.onclose = () => { if (myId) toast('Koneksi terputus, muat ulang halaman'); };
+}
+
+function leave() { local?.getTracks().forEach((t) => t.stop()); ws?.close(); location.href = '/'; }
+
+$('#joinBtn').onclick = join;
+['#room', '#name'].forEach((sel) => $(sel).addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); }));
+$('#leaveBtn').onclick = leave;
+$('#chatform').onsubmit = (e) => { e.preventDefault(); const v = $('#chatin').value.trim(); if (v) ws.send(JSON.stringify({ type: 'chat', text: v })); $('#chatin').value = ''; };
+$('#copyBtn').onclick = () => navigator.clipboard.writeText(location.href).then(() => toast('Tautan disalin'));
+
+function toggle(btn, kind, onTxt, offTxt) {
+  btn.onclick = () => {
+    const tr = (kind === 'audio' ? local.getAudioTracks() : local.getVideoTracks())[0]; if (!tr) return;
+    tr.enabled = !tr.enabled; btn.textContent = tr.enabled ? onTxt : offTxt; btn.classList.toggle('off', !tr.enabled);
+  };
+}
+toggle($('#micBtn'), 'audio', 'Matikan mik', 'Nyalakan mik');
+toggle($('#camBtn'), 'video', 'Matikan kamera', 'Nyalakan kamera');
+
+let sharing = false;
+$('#scrBtn').onclick = async () => {
+  const swap = async (track) => {
+    for (const { pc } of Object.values(peers)) {
+      const s = pc.getSenders().find((x) => x.track && x.track.kind === 'video'); s && await s.replaceTrack(track);
+    }
+    local.removeTrack(local.getVideoTracks()[0]); local.addTrack(track);
+    tile('me', myName + ' (Anda)', local, true);
+  };
+  if (!sharing) {
+    try {
+      const d = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const t = d.getVideoTracks()[0]; t.onended = () => sharing && $('#scrBtn').click();
+      await swap(t); sharing = true; $('#scrBtn').textContent = 'Hentikan berbagi';
+    } catch {}
+  } else {
+    local.getVideoTracks()[0].stop(); await swap(camTrack.readyState === 'live' ? camTrack : (await navigator.mediaDevices.getUserMedia({ video: true })).getVideoTracks()[0]);
+    sharing = false; $('#scrBtn').textContent = 'Bagikan layar';
+  }
+};
+</script>
+</body>
+</html>

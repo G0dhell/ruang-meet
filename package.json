@@ -1,0 +1,8 @@
+{
+  "name": "ruang-meet",
+  "version": "1.0.0",
+  "description": "Aplikasi meeting online tanpa batas waktu (WebRTC + WebSocket)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}
